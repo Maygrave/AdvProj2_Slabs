@@ -1,0 +1,88 @@
+---
+title: "Step 5 - The Final Merge"
+author: "Anna Ruby"
+date: "February 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing Libraries
+
+```{r ImportLibraries, echo = FALSE, warning = FALSE}
+rm(list = ls())
+library(readxl)
+library(tidyverse)
+library(doBy)
+library(caret)
+library(randomForest)
+library(data.table)
+library(knitr)
+library(kableExtra)
+```
+
+## Loading Data
+
+I created all data used here, excluding the"stage8_ident.Rdata", created by Prof. Wilhelm. 
+
+```{r LoadData}
+load("../anna_data/anna_df_BZA2_1.Rdata")
+load("../Data/stage8_ident.Rdata")
+load("../anna_data/anna_nachVerschrottung_updated_1.Rdata")
+```
+
+## Merging Data
+```{r Merge1}
+#then aggregating all by lTileID
+TV_WBW1.wide.agg <- setDT(df_WBW_length)[, lapply(.SD, mean), by = c("MAT_IDENT","lTileID")]
+
+SGA.agg <- setDT(df_SGA[,c(3,5:6,8:65)])[, lapply(.SD, mean), by = c("MAT_IDENT", "lTileID")]
+SGA.VorgHA <- setDT(df_SGA[,c(3,7)])
+SGA.VorgHA.agg <- unique(SGA.VorgHA)
+
+SGA.agg <- SGA.agg %>%
+  dplyr::left_join(SGA.VorgHA.agg, by=c("MAT_IDENT"))
+
+#Dropping unneeded large table
+rm(df_SGA)
+rm(SGA.VorgHA)
+```
+
+### Merging
+```{r Merge2}
+dataSGABZA <- df_BZA %>%
+  dplyr::left_join(SGA.agg, by=c("MAT_IDENT", "lTileID")) %>%
+  dplyr::select(MAT_IDENT, lTileID, CoilID, POSITION_X, RIEGELLAENGE, VORG_HAUPTAGGREGAT, Class.4, Class.14, Class.15, everything())
+
+df <- dataSGABZA %>%
+  dplyr::left_join(TV_WBW1.wide.agg, by=c("MAT_IDENT", "lTileID"))
+```
+
+## Saving Data, Validating Data, and Final Comments  
+### Saving Data  
+Data was saved before validation to ensure accurate comparisons.
+```{r SaveData}
+save(df, file="../anna_data/anna_merged_data_1.Rdata")
+``` 
+
+### Validating Data
+```{r ValidateData}
+rm(list = ls())
+load("../anna_data/anna_merged_data_1.Rdata")
+
+#Mydata
+a_df <- df
+rm(df)
+
+#Wilehlm Data
+load("../Data/stage8_merged_data.Rdata")
+
+anti_join(a_df, df)
+#Off by about 1700 Obvs
+```
+
+ 
+### Final Comments
+The final merge has resulted in a few different observations than in the original data set, but, as I've reviewed the files numerous times and not found any sincerely worrying differences, I'll be using this output for all of my modeling.

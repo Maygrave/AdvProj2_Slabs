@@ -1,0 +1,116 @@
+---
+title: "Step 3.1 - Reducing the BZA using the Ident DAta"
+author: "Anna Ruby"
+date: "February 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing Libraries
+
+```{r ImportLibraries, warning = FALSE, echo=FALSE}
+rm(list=ls())
+library(readxl)
+library(tidyverse)
+library(doBy)
+library(caret)
+library(randomForest)
+library(data.table)
+library(kableExtra)
+library(knitr)
+```
+
+## Loading Data
+All data loaded here was originally ceated by Prof. Wilhelm.
+
+```{r LoadData}
+load("../anna_data/anna_df_BZA_1.Rdata") 
+load("../Data/stage8_ident.Rdata")
+```
+
+## Reducing the BZA Data
+
+```{r ReduceData}
+#Merge w/ V_COILS_BZA & filter by ident.all.df
+df_BZA <- df_BZA %>%
+  dplyr::inner_join(ident.all.df, by = c("CoilID" = "SID")) %>%
+  dplyr::select(MAT_IDENT, CHARGEN_NR, VORBRAMME, CoilID, lTileID, everything()
+  )
+```
+
+
+```{r LongForm}
+#Converting to Long Form
+df_BZA_long <- df_BZA %>%
+  tidyr::gather(key=length_attr, value=measurement, -c(CHARGEN_NR, VORBRAMME, MAT_IDENT, CoilID, lTileID))
+```  
+
+#### Computing Error Descriptives
+
+```{r Desccriptives1, echo = FALSE}
+#Compute Error Descriptives
+df_BZA_desc <- df_BZA_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE), 
+    N=sum(!is.na(measurement))
+  )
+df_BZA_desc %>% 
+  kable("html", caption = "Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center")
+```  
+
+
+```{r Plot1, echo = FALSE}
+p <- ggplot(data = df_BZA_long, aes(x = measurement)) + geom_histogram(bins = 20) + facet_wrap(~length_attr, scales = "free") 
+p 
+```
+
+```{r}
+#Back to wide
+df_BZA <- df_BZA_long %>%
+  tidyr::spread(key = length_attr, value = measurement)
+```
+
+## Saving Data, Validating Data, and Final Comments
+### Saving Data
+
+Data was saved before validation in order to ensure accurate comparisons.
+
+```{r}
+save(df_BZA, df_BZA_desc, file="../anna_data/anna_df_BZA2_1.Rdata")
+```  
+
+### Validating Data
+
+```{r}
+#Validating data
+rm(list=ls())
+load("../anna_data/anna_df_BZA2_1.Rdata")
+A_df_BZA <- df_BZA
+A_df_BZA_DESC <- df_BZA_desc
+
+rm(df_BZA, df_BZA_desc)
+
+#Load wilhelms data
+load("../Data/df_BZA2.Rdata")
+
+anti_join(A_df_BZA, df_BZA)
+#Does Not Match
+anti_join(A_df_BZA_DESC, df_BZA_desc)
+#good
+```
+
+The df_BZA file does not match to Prof. Wilhelm's output, as expected. The df_BZA_desc file does match. 
+
+### Final Comments
+The data was expeccted to no longer match to Prof. Wilhelm's output, due to the first part of Step 3, so this is not a surprise. Both data sets will be used in future analysis.

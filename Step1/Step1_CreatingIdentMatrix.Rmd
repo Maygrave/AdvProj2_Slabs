@@ -1,0 +1,168 @@
+---
+title: "Step1 - Creating the Identifying Matrix"
+author: "Anna Ruby"
+date: "February 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing Libraries
+
+```{r warning=FALSE, eval=TRUE, echo=FALSE, include=TRUE}
+rm(list=ls())
+library(readxl)
+library(tidyverse)
+library(doBy)
+library(caret)
+library(randomForest)
+library(data.table)
+```
+
+## Importing Data
+
+In the original code, only one dataset, the first listed here, was used. I could not find reference to a file called later in the code, "TV_WBW1.long", which can be found in the tks_logitudinal.Rdata file. I have therefore imported it here, so that the file can be utilized.
+
+```{r LoadData}
+load("../Data/DataMining_28VA1_JU_20180507.RData")
+load("../Data/tks_longitudinal.Rdata")
+```
+
+## Preparing the ident matrix for Slab IDs 
+### Linking BZA, WBW1, and SGA
+
+```{r PrepData}
+ident.SGA.df <- Tera_T_ARBEITSGANG_DURCHSATZ %>%
+  dplyr::select(MAT_IDENT, CHARGEN_NR, VORBRAMME)
+apply(ident.SGA.df, 2, function(x) {length(unique(x))})
+#Mat_Ident:995,Charge_NR:320,Vorbramme:33
+```
+```{r}
+ident.SGA2.df <- SGA_Prozessdaten_Durchsatz %>%
+  dplyr::select(CHARGEN_NR, VORBRAMME) %>%
+  dplyr::inner_join(ident.SGA.df, by = c("CHARGEN_NR", "VORBRAMME"))%>%
+  dplyr::add_count(CHARGEN_NR, VORBRAMME) %>%
+  dplyr::add_count(MAT_IDENT)
+length(unique(ident.SGA2.df$MAT_IDENT))
+#length(c(unique(ident.SGA2.df$CHARGEN_NR, ident.SGA2.df$VORBRAMME)))
+```
+```{r}
+ident.BZA.df <- V_COILS_BZA %>%
+  dplyr::select(SID, SCHMELZ_NR, WB_VORBR_NR)
+apply(ident.BZA.df, 2, function(x) {length(unique(x))})
+#SID:663,SCHMELZ_Nr:249,WB_VORBR_NR:23
+```
+```{r}
+ident.wbw1.df <- Tera_V_MESSWERT_EINZEL_WBW1 %>%
+  dplyr::select(MAT_IDENT) %>%
+  unique()
+apply(ident.wbw1.df, 2, function(x) {length(unique(x))})
+#Mat_Ident:968
+```
+
+Below, we can see the aforementioned data file, not included in the Data Mining file.
+
+```{r Ident1}
+ident.wbw2.df <- TV_WBW1.long %>%
+  dplyr::select(MAT_IDENT) %>%
+  unique()
+apply(ident.wbw2.df, 2, function(x) {length(unique(x))})
+
+ident.wbw3.df <- Tera_V_SPUR_WBW1 %>%
+  dplyr::select(MAT_IDENT) %>%
+  unique()
+apply(ident.wbw3.df, 2, function(x) {length(unique(x))})
+```
+
+```{r Ident2}
+ident.wbw.df <- ident.wbw1.df %>%
+  dplyr::inner_join(ident.wbw3.df, by ="MAT_IDENT") %>%
+  dplyr::inner_join(ident.wbw2.df, by ="MAT_IDENT") 
+apply(ident.wbw.df, 2, function(x) {length(unique(x))})
+#Mat_Ident:968
+```
+
+```{r Ident3}
+ident.SGA_BZA.df <- ident.SGA.df %>%
+  dplyr::inner_join(ident.BZA.df, by= (c("CHARGEN_NR" = "SCHMELZ_NR", "VORBRAMME"  = "WB_VORBR_NR")))
+apply(ident.SGA_BZA.df, 2, function(x) {length(unique(x))})
+#Mat_Ident:661,Chargen_NR:249,VorBramme:23,SID:661
+```
+
+```{r IdentAll}
+ident.all.df <- ident.wbw.df %>%
+  dplyr::inner_join(ident.SGA_BZA.df, by ="MAT_IDENT")
+apply(ident.all.df, 2, function(x) {length(unique(x))})
+#Mat_Ident:657,Chargen_NR:249,Vorbramme:22,SID:657
+```
+
+## Data Validation, Final Comments, and Saving the Data Files  
+### Saving the Data  
+
+Data was saved before validation to ensure an accurate comparison.  
+
+```{r}
+save(list=ls(pattern = "ident."), file="../anna_data/Anna_ident_1.Rdata")
+
+```  
+
+### Data Validation  
+Using dyplr's anti_join function, I compared the data files created using my code against those created by Prof. Wilhelm.  
+
+```{r}
+#Reviewing differences in Wilhelm output data, and output data produced here
+#clear data
+rm(list=ls())
+
+#load Wilhelm's output
+load("../Data/stage8_ident.Rdata")
+
+#change variable name > This is the Wilhelm Data
+AW_Ident <- ident.all.df
+AW_ident.BZA <- ident.BZA.df
+AW_ident.defects <- ident.defects
+AW_ident.SGA_BZA <- ident.SGA_BZA.df
+AW_ident.SGA <- ident.SGA.df
+AW_ident.wbw <- ident.wbw.df
+AW_ident.wbw1 <- ident.wbw1.df
+AW_ident.wbw2 <- ident.wbw2.df
+AW_ident.wbw3 <- ident.wbw3.df
+AW_slab.ident.BZA_lack <- slab.ident.BZA_lack.df
+AW_tile.ident.BZA <- tile.ident.BZA.df
+rm(ident.all.df, ident.BZA.df, ident.defects, ident.SGA_BZA.df, 
+  ident.SGA.df, ident.wbw.df, tile.ident.BZA.df, ident.wbw1.df, 
+  ident.wbw2.df, slab.ident.BZA_lack.df, ident.wbw3.df)
+
+#Loading in the data I produced
+load("../anna_data/Anna_ident_1.Rdata")
+```  
+We can see already there there are three files which do not appear in my loaded data. 
+These are:  
+
+* ident.defects
+* slab.ident.BZA_lack
+* tile.ident.BZA.df  
+
+```{r}
+#checking
+anti_join(AW_Ident, ident.all.df)#good
+anti_join(AW_ident.BZA, ident.BZA.df)#good
+anti_join(AW_ident.SGA_BZA, ident.SGA_BZA.df)#good
+anti_join(AW_ident.SGA, ident.SGA.df)#good
+anti_join(AW_ident.wbw, ident.wbw.df)#good
+anti_join(AW_ident.wbw1, ident.wbw1.df)#good
+anti_join(AW_ident.wbw2, ident.wbw2.df)#good
+anti_join(AW_ident.wbw3, ident.wbw3.df)#good
+```  
+### Final Comments  
+
+Although all data I produced matches to the corresponding data provided by Prof. Wilhelm, there are three files which can be found in his version of the final output data "stage8_ident.Rdata", which do not seem to be created here.  
+These files are, as mentioned above:  
+
+* ident.defects
+* slab.ident.BZA_lack
+* tile.ident.BZA.df 
+  
+Although all of my data was succesfully matched to the data produced by Prof. Wilhelm, due to the fact that I am missing 3 files included in his output, and I am uncertain as to how these files were created, I will continue to use the data produced by Prof. Wilhelm in all later files. This is the only time in the project where I will utilize output generated by someone other than me.

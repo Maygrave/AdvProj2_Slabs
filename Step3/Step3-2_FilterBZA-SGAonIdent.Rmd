@@ -1,0 +1,184 @@
+---
+title: "Step3.2 - Merging Filtered BZA and SGA"
+author: "Anna Ruby"
+date: "February 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing Libraries
+
+```{r ImportLibraries, echo = FALSE}
+rm(list=ls())
+library(readxl)
+library(tidyverse)
+library(doBy)
+library(caret)
+library(randomForest)
+library(data.table)
+library(knitr)
+library(kableExtra)
+library(summarytools)
+```  
+```{r, echo = FALSE, include = FALSE}
+st_css()
+```
+
+## Loading Data
+
+Although I am continuing to use the ident file created by Prof. Wilhelm, all other files loaded are my own.
+
+```{r LoadData}
+load("../anna_data/anna_df_BZA2_1.Rdata")
+load("../Data/stage8_ident.Rdata")
+load("../anna_data/anna_df_SGA_1.Rdata")
+```
+
+## Test Filtering
+
+```{r TestFilter}
+#test Filtering on ident.SGA_BZA
+df_BZA <- df_BZA %>%
+  dplyr::inner_join(ident.SGA_BZA.df, by = c("CoilID" = "SID", "MAT_IDENT", "CHARGEN_NR", "VORBRAMME"))
+#Nothing, Yay
+
+#test filter on ident.SGA_BZA
+df_SGA <- df_SGA %>%
+  dplyr::inner_join(ident.SGA_BZA.df, by = c("CHARGEN_NR", "VORBRAMME", "MAT_IDENT", "SID"))
+#Nothing, Yay
+```
+
+```{r Aggregate}
+#Aggregate SGA data on slab level to get slab length
+SGA_slabs <- summaryBy(RIEGELLAENGE  ~  CHARGEN_NR + VORBRAMME, data=df_SGA,
+                       FUN=c(min,max,length))
+SGA_slabs <- SGA_slabs %>%
+  dplyr::mutate(length = RIEGELLAENGE.max - RIEGELLAENGE.min,
+                tilelength = length/512)
+
+#Order S.T. obvs increase first by Mat_Ident and Riegellaenge
+df_SGA <- df_SGA %>%
+  dplyr::arrange(MAT_IDENT, RIEGELLAENGE)
+```
+
+#### Computing Descriptives
+```{r Descriptives1}
+SGA.summary <- doBy::summaryBy(RIEGELLAENGE ~  CHARGEN_NR + VORBRAMME, data=df_SGA,FUN=c(min, median, mean, max, sd, length))
+
+SGA.summary <- SGA.summary %>%
+  mutate(RIEGELLAENGE.range = 
+           RIEGELLAENGE.max - RIEGELLAENGE.min)
+```
+```{r SGASum3, results="asis", prompt=FALSE, cache=FALSE, echo = FALSE}
+print(dfSummary(SGA.summary, round.digits = 5, valid.col = FALSE, graph.magnif = 5, plain.ascii = FALSE, footnote = NA), max.tbl.height = 500, method = "render", headings = FALSE, bootstrap.css = FALSE)
+```
+
+```{r SlabSelect}
+#Selecting slabs ending with Vorbramme 2, switch start and end positions
+#adjust RIEGELLAENGE 
+SGA.summary.VB2 <- SGA.summary %>%
+  filter(VORBRAMME %% 2 == 0)
+
+SGA_lengthVB2 <- df_SGA %>%
+  filter(VORBRAMME %% 2 == 0) %>%
+  mutate(
+    RIEGELLAENGE.max.slab = rep(SGA.summary.VB2$RIEGELLAENGE.max,      SGA.summary.VB2$RIEGELLAENGE.length),
+    RIEGELLAENGE = RIEGELLAENGE.max.slab - RIEGELLAENGE
+  )
+```
+
+```{r SGASum4, results="asis", prompt=FALSE, cache=FALSE, echo = FALSE}
+print(dfSummary(SGA.summary.VB2, round.digits = 5, valid.col = FALSE, graph.magnif = 5, plain.ascii = FALSE, footnote = NA), max.tbl.height = 500, method = "render", headings = FALSE, bootstrap.css = FALSE)
+```
+
+## Merging
+
+```{r Merge1}
+#Mergeing the set together
+SGA.summary.VB3 <- SGA.summary %>%
+  filter(VORBRAMME %% 2 != 0)
+SGA_lengthVB3 <- df_SGA %>%
+  filter(VORBRAMME %% 2 != 0) %>%
+  mutate(
+    RIEGELLAENGE.max.slab = rep(SGA.summary.VB3$RIEGELLAENGE.max,       SGA.summary.VB3$RIEGELLAENGE.length)
+  )
+df_SGA <- SGA_lengthVB2 %>%
+  dplyr::bind_rows(SGA_lengthVB3) 
+```
+```{r SGASum6, results="asis", prompt=FALSE, cache=FALSE, echo = FALSE}
+print(dfSummary(SGA.summary.VB3, round.digits = 5, valid.col = FALSE, graph.magnif = 5, plain.ascii = FALSE, footnote = NA), max.tbl.height = 500, method = "render", headings = FALSE, bootstrap.css = FALSE)
+```
+
+#### Computing Descriptives
+
+```{r Descriptives2, echo = FALSE}
+df_SGA_long <- df_SGA %>%
+  tidyr::gather(key=length_attr, value=measurement, -c(CHARGEN_NR, VORBRAMME, MAT_IDENT, SID, VORG_HAUPTAGGREGAT, STRANGNUMMER, RIEGELLAENGE))
+df_SGA_desc <- df_SGA_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE), 
+    N=sum(!is.na(measurement))
+  )
+df_SGA_desc %>% 
+  kable("html", caption = "Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")
+```
+
+```{r Plot2, echo = FALSE, eval = FALSE}
+p <- ggplot(data = df_SGA_long, aes(x = measurement)) + geom_histogram() + facet_wrap(~length_attr, scales = "free") 
+p
+```
+```{r SGASum2, cache=FALSE, echo=FALSE, prompt=FALSE, results="asis"}
+dfSum_SGA <- dfSummary(df_SGA, valid.col = FALSE, graph.magnif = 5, plain.ascii = FALSE, footnote = NA)
+
+dfSum_SGA_graphs <- dfSum_SGA %>%
+  dplyr::select(No, Variable, "Stats / Values", Graph)
+
+print(dfSum_SGA_graphs, max.tbl.height = 500, method = "render", headings = FALSE, bootstrap.css = FALSE)
+```  
+
+## Saving Data, Data Validation, and Final Comments  
+### Saving Data  
+Data was saved before validation to ensure accurate comparisons.
+```{r SaveData}
+save(df_SGA, df_SGA_desc, SGA.summary, file="../anna_data/anna_df_SGA_filtered_BZA_1.Rdata")
+``` 
+
+### Validating Data
+
+```{r ValidateData}
+#Validating Data
+rm(list=ls())
+load("../anna_data/anna_df_SGA_filtered_BZA_1.Rdata")
+
+#My data
+a_df_SGA <- df_SGA
+a_df_SGA_desc <- df_SGA_desc
+a_SGA.summary <- SGA.summary
+rm(df_SGA, df_SGA_desc, SGA.summary)
+
+#Wilhelms DAta
+load("../Data/df_SGA_filtered_BZA.Rdata")
+
+anti_join(a_df_SGA, df_SGA)
+#Match!
+anti_join(a_df_SGA_desc, df_SGA_desc)
+#Match!
+anti_join(a_SGA.summary, SGA.summary)
+#Match
+```
+This does match.
+
+### Final Comments
+As all data was successfully recreated, I will be substituing my data files in where appropriate in all following files.

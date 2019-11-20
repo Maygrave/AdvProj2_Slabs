@@ -1,0 +1,36 @@
+#Data is proprietary
+Data/
+anna_data/
+.RData
+.Rhistory
+Step5/ProtModWorkSpace.RData
+.Rproj.user/
+
+#Restricting Histories
+Step1/.Rhistory
+Step5/.Rhistory
+
+#Knit status was just used for my record while working
+#they contain no interesting information
+Step2/KnitStatus_Step2.txt
+Step3/KnitStatus_Step3.txt
+Step4/KnitStatus_Step4.txt
+Step5/KnitStatus_Step5.txt
+
+#Random txt files
+txt_files/
+Step5/anna_Length_ListofVariableswithCor1.txt
+Step5/anna_length_ListofVariableswithCorLT095.txt
+
+#Random Figures
+Step1/Step1_Pres-figure/
+
+#Test files
+Test/
+
+#Generally Unhelpful Files
+Step1/Step1_Pres.md
+Step1/Step1_Pres.Rpres
+Step2/file7b82324994.html
+Step3/BAD_Step3_PreppingBZAData.R
+Notes

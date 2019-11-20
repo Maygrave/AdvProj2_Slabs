@@ -1,0 +1,136 @@
+---
+title: "Step 2 - Filtering SGA Data on Ident"
+author: "Anna Ruby"
+date: "February 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing Libraries
+
+```{r ImportLibraries, echo=FALSE, warning=FALSE}
+rm(list=ls())
+library(readxl)
+library(tidyverse)
+library(doBy)
+library(caret)
+library(randomForest)
+library(data.table)
+library(kableExtra)
+library(knitr)
+library(summarytools)
+```
+
+```{r, echo = FALSE}
+st_css()
+```
+
+## Loading Data
+
+Here, although I still am using Prof. Wilhelms ident matrix data, I am using my own SGA data, called here `anna_data_SGA.Rdata`, created in the previous part of step 2.
+
+```{r LoadData}
+load("../anna_data/anna_data_SGA_1.Rdata")
+load("../Data/stage8_ident.Rdata")
+```
+
+## Filtering the SGA data Using the Ident Data
+
+```{r Filter}
+#flitering on ident.all.df 
+df_SGA <- data_SGA %>%
+  dplyr::inner_join(ident.all.df, by = c("CHARGEN_NR", "VORBRAMME"))
+
+#Geting a logical order
+df_SGA <- df_SGA %>%
+  dplyr::select(CHARGEN_NR, VORBRAMME, MAT_IDENT, SID, RIEGELLAENGE, STRANGNUMMER, VORG_HAUPTAGGREGAT, everything()
+  )
+```
+
+#### Computing Descriptives
+
+```{r Desccriptives1, echo = FALSE}
+df_SGA_long <- df_SGA %>%
+  tidyr::gather(key=length_attr, value=measurement, -c(CHARGEN_NR, VORBRAMME, MAT_IDENT, SID, RIEGELLAENGE, VORG_HAUPTAGGREGAT))
+
+df_SGA_desc <- df_SGA_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE), 
+    N=sum(!is.na(measurement))
+  )
+df_SGA_desc %>% 
+  kable("html", caption = "Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")
+```  
+
+
+### Reviewing Variable Distributions
+
+```{r Plot1, echo = FALSE, fig.height=10}
+# var_num_names <- colnames(df[,sapply(df,is.numeric)])
+
+p <- ggplot(data = df_SGA_long, aes(x = measurement)) + geom_histogram() + facet_wrap(~length_attr,  scales = "free") 
+p 
+ggsave("../images_1/step2/VarDists_part2.png")
+```
+
+```{r SGASum, results="asis", prompt=FALSE, cache=FALSE, echo = FALSE}
+dfSum_SGA <- dfSummary(df_SGA, valid.col = FALSE, graph.magnif = 5, plain.ascii = FALSE, footnote = NA)
+
+dfSum_SGA_graphs <- dfSum_SGA %>%
+  dplyr::select(No, Variable, "Stats / Values", Graph)
+
+print(dfSum_SGA_graphs, max.tbl.height = 500, method = "render", headings = FALSE, bootstrap.css = FALSE)
+```
+
+## Saving Data, Validating Data, and Final Comments  
+### Saving Data
+
+Data was saved before validation to ensure accurate comparisons.
+
+```{r SaveData}
+#Saving data reduced through filtering
+save(df_SGA, df_SGA_desc, file="../anna_data/anna_df_SGA_1.Rdata")
+``` 
+
+### Validating Data
+
+```{r ValidateData}
+#Clear data files
+rm(list=ls())
+
+#~~Comparing w/ Wilhelm~~#
+
+#load my data
+load("../anna_data/anna_df_SGA_1.Rdata")
+anna_df_SGA <- df_SGA
+anna_df_SGA_desc <- df_SGA_desc
+rm(df_SGA, df_SGA_desc)
+
+#Load Wilhelm's Data
+load("../Data/df_SGA.Rdata")
+
+#Compare df_SGA
+dplyr::anti_join(df_SGA, anna_df_SGA)
+#Both 0 - Data frames match!
+
+#compare df_SGA_desc
+dplyr::anti_join(df_SGA_desc, anna_df_SGA_desc)
+#Both 0 - Data Frames match!
+```  
+
+All data has been successfully validated against the data created by Prof. Wilhelm.  
+
+### Final Comments  
+As the data has been successfully replicated, my data files will be substituted in for the matching files created by Prof. Wilhelm in all following files.

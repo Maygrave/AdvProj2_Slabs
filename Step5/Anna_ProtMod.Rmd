@@ -1,0 +1,1119 @@
+---
+title: "Modeling for Errors: Class 4, 14, & 15"
+author: "Anna Ruby"
+date: "February 1, 2019"
+output: 
+  html_document:
+    theme: spacelab
+    toc: TRUE
+    toc_depth: 3
+    toc_float: TRUE
+    number_sections: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The following analysis is conducted on data describing production of steel sheets and the presence of any errors -- classes 4, 14, and 15 -- on their surfaces. Data used to inform this anlysis was reduced from many larger original sets. Most dropped variables were removed based on the analysis in steps 1-5 of the data reduction and treatment stage, although some were also removed at the instruction of others and these are noted with the variable removals. This, and all earlier analysis, was done in an attempt to both reproduce those results found by Prof. Wilhelm et. al. and to improve on any previous analysis done in the original "ProtMod" file.
+
+During these steps, almost all data files were successfully reproduced, excluding one file in step three, and the orginal identifying index matrix. With regard to the index matrix - all results which could be reproduced were done so accurately, but there exist three files in the final workspace data set which were not shown to be created in the orginal code file. Without requisite information to recreate these files, it would be possible to incorrectly identify observations in future analysis, and as such the orginal identifying matrix produced by Prof. Wilhelm was used throughout my anaylsis. Conversely, the data created in step 3 which did not match to previously produced data was included in my analysis instead of the orginal data file produced by Professor Wilhelm. These files differed by approx. 3,700 observations of a total approx. 33,800. 
+
+
+
+# Importing Libraries
+
+```{r ImportLibraries, warning = FALSE, message=FALSE, results='hide'}
+rm(list=ls())
+library(readxl)
+library(ggplot2)
+library(plyr)
+library(data.table)
+library(tidyverse)
+library(randomForest) #for random forests
+library(caret) # for CV folds and data splitting
+library(GGally)
+library(MASS)
+library(car)
+library(party)
+library(partykit)
+library(xtable)
+library(knitr)
+library(kableExtra)
+library(summarytools)
+library(gridExtra)
+```
+``` {r echo = FALSE, include = FALSE}
+st_css()
+```
+
+***
+
+## Loading Data 
+
+```{r LoadData}
+load("../anna_data/anna_merged_data_1.Rdata")
+```   
+
+  
+***
+  
+## Treating Data
+
+```{r TreatData}
+#Lists of Var type by name - Index variables, Numeric variables, and Categorical variables
+var.index <- c("MAT_IDENT", "lTileID", "CoilID")
+var.num <- colnames(df[,sapply(df,is.numeric)])
+var.factor <- c("VORG_HAUPTAGGREGAT.x", "BPW_ERZEUGUNG", "FLAEMMGRAD_IST", "TAUCHAUSGUSS")
+
+#Reordering by index variables
+df <- df %>%
+  dplyr::select(var.index, everything())
+
+#Variable Reduction
+#Dropping sf, RIEGELLAENGE.max.slab, & ltile_length
+df <- df %>%
+  dplyr::select(-c(sf, RIEGELLAENGE.max.slab, lTile_length))
+```
+
+```{r LongForm, warning=FALSE}
+#Send to long format; review missing patterns
+df_long <- df %>%
+  tidyr::gather(key=length_attr, value=measurement, -c(MAT_IDENT, lTileID, CoilID))
+```
+
+#### Computing Descriptives 
+
+Computed below, by variable, is the number of observations ("count"), the number of unique observations ("unique"), the number of missing values ("na"), and the number of non-missing entries ("N").
+
+```{r Descriptives1, echo = FALSE}
+df_desc <- df_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    N=sum(!is.na(measurement))
+  )
+
+df_desc %>%
+  kable("html", caption = "Descriptives - Review for Constant Variables") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")  
+
+```  
+  
+With the above table we can review the number of missing values in each variable, if any patterns arise from these missings, and if there are any constant variables --- variables without variation. We drop all constant variables, as by their own lack of variation they are not meaningful in explaining the variation in other variables.
+
+```{r DropConst}
+#Drop constant vars
+var.all.const <- df_desc%>%
+  dplyr::filter(unique == 1) %>%
+  dplyr::select(length_attr) %>%
+  unlist() %>%
+  as.character()
+
+length(var.all.const)
+```
+```{r eval=FALSE, include=FALSE}
+df_long <- df_long %>%
+  dplyr::filter(!length_attr %in% var.all.const)
+df <- df %>%
+  dplyr::select(-var.all.const)
+```  
+
+When reviewing var.all.const it becomes clear that there are no constant variables, so there is nothing here to drop.   
+With regard to the missing values, we can see from the table that there appears to be a rather obvious pattern; variables in our data almost all either have 10513, 1718, or no missing values, although certain varibles, which will be listed below, do not follow this pattern. As our data is identified across multiple levels of specificity (ie slab, tile, etc) this implies that certain groups of variables are collected only within certain scopes. As it may be the case that data for certain variables may be collected concurently, variables should be reviewed for correlation.
+
+* Variables not following an above-referenced missing pattern:
+	+ 4034: POSITION_X.y, Length.max.slab
+	+ 2736: TU_LS_SSR
+	+ 2620: TO_FS_SSL
+	+ 2298: TU_FS_M
+	+ 1959: TU_LS_M, TU_LS_SSR
+
+Next, we seperate the variables by data type, such as integer (int), categorical (factor), and numeric. The data frame is than split on those types.
+
+```{r SplitDF}
+#var lists by type
+var.list <- colnames(df) #names of all variables
+var.int <- colnames(df[,sapply(df,is.integer)]) #integer variables
+var.factor <- colnames(df[,sapply(df,is.factor)]) #categorical vars
+var.num <- colnames(df[,sapply(df,is.numeric)]) #numeric vars
+
+#splitting DF by type
+df_factor <- df %>%
+  dplyr::select(var.index,var.factor)
+df_num <- df %>%
+  dplyr::select(var.num, -var.int)
+```
+
+## Exploring Numeric Variables
+```{r NumLongForm}
+df_num_long <- df_num %>%
+  gather(key=slab_attr, value=measurement)
+#descriptives here are group over the entire df
+```
+
+### Computing Descriptives of Numeric Variables
+
+```{r Desccriptives2, echo = FALSE}
+df_num_desc <- df_num_long %>% 
+  dplyr::group_by(slab_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE), 
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    N=sum(!is.na(measurement)),
+    max_freq = max(table(measurement)),
+    min_freq = min(table(measurement)),
+    freq_ratio = (max_freq-min_freq)/unique
+  )
+
+df_num_desc %>%
+  kable("html", caption = "Numeric Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")  
+
+```  
+  
+Again, we are looking for variables without variation and any interesting patterns within the data. Although above, it was determined that a variable was constant by reviewing how many unique observations it had, here variables are checked for a standard deviation of 0. 
+
+```{r DropConst2}
+#Dropping variables with no variation
+var.sd0 <- df_num_desc %>%
+  dplyr::filter(sd==0) %>%
+  dplyr::select(slab_attr) %>%
+  unlist() %>%
+  as.character()
+
+df_num_long <- df_num_long %>%
+  dplyr::filter(!slab_attr %in% var.sd0)
+
+df_num <- df_num %>%
+  dplyr::select(-var.sd0)
+```
+
+From the table above we see that there is only one variable with a standard deviation of zero --- "ENTZ__ZWR1_EL_SN3__IR__S". This is also the only variable selected and dropped in the above code chunk. We now calculate the pairwise correlation of all our numeric variables.
+
+### Correlation Matrix of Numeric Variables
+
+```{r Cormat1, fig.width=10, fig.height=15, echo = FALSE}
+cormat <- round(cor(df_num, use="pairwise.complete.obs"),4)
+
+Upper.cormat <- df_num %>%
+  corrr::correlate() %>%
+  corrr::rearrange(method = "MDS", absolute = FALSE) %>%
+  corrr::shave() %>%
+  corrr::rplot(shape = 19, colors = c("red", "green"))
+Upper.cormat
+
+Upper.cormat %>%
+  ggplot2::ggsave(filename = "Upper.Corplot.NumVars.png",
+                  width = 10, height = 15)
+
+```  
+
+The plot above shows the pairwise correlation of all variables, with postive correlation being marked in green and negative correlation marked with red. Additionally, variables are arranged such that groups of correlated variables are listed together. For all pairs which are absolutely correlated --- i.e. having correlation of 1 or -1 -- only one member of the pair will be kept in the final data set. When variables are totally correlated, the informtion that they provide in describing the variability of other variables is redundant. The latter half of the pair is dropped in order to account for this redundancy.
+
+```{r CorDrop1}
+#For all pairs which are fully, absolutely correlated, we keep only one
+corONE <- function(x) {
+    if (is.matrix(x)) {
+      cor1.df <- data.frame(which(abs(x)==1, arr.in=TRUE))
+      setDT(cor1.df, keep.rownames = TRUE)[]
+      cor1.list <- cor1.df$rn[which(cor1.df$row > cor1.df$col, arr.in=TRUE)]
+      grx <- glob2rx("*.*")
+      duplicate.list <- grepl(grx,cor1.list, perl=TRUE)
+      cor1.list <- cor1.list[!duplicate.list]
+    } else {
+      print("no matrix!")
+    }
+}
+
+#list of all totally correlated variables
+cor1.list <- corONE(cormat)
+write.table(cor1.list, file="anna_Length_ListofVariableswithCor1.txt", sep="\t")
+
+#Drop corresponding columns
+df_num <- df_num %>%
+  dplyr::select(-cor1.list)
+```
+
+### Computing New Descriptives for Numeric Variables
+
+```{r Descriptives3, echo = FALSE}
+df_num_long <- df_num %>%
+  gather(key=slab_attr, value=measurement) 
+
+df_num_desc2 <- df_num_long %>% 
+  dplyr::group_by(slab_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE), 
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    N=sum(!is.na(measurement))
+  )
+
+df_num_desc2 %>%
+  kable("html", caption = "Numeric Variable Descriptives - Updated") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")  
+
+```  
+  
+Since last computing these descriptive satistics, 9 variables have been dropped. With that in mind, the data set still contains multiple variables with high pairwise correlations. As such, the pair-wise correlation is re-computed on the reduced data set. Then, those pairs with absolute correlation greater than or equal to .95 will be selected. These are variables which, pairwise, can explain at least 95% of the variability in one another. Since they are still so highly correlated, again only the first half of such pairs will be kept in the data set for further analysis.
+
+### Correlation Matrix of Numeric Varaibles - Updated
+
+```{r Cormat2, fig.width=10, fig.height=15, echo=FALSE}
+#recalculating cormat after dropping variables
+cormat <- round(cor(df_num, use="pairwise.complete.obs"),4)
+
+Upper.cormat <- df_num %>%
+  corrr::correlate() %>%
+  corrr::rearrange(method = "MDS", absolute = FALSE) %>%
+  corrr::shave() %>%
+  corrr::rplot(shape = 19, colors = c("red", "green"))
+Upper.cormat
+
+Upper.cormat %>%
+  ggplot2::ggsave(filename = "Upper.Corplot.NumVars.Updated.png",
+                  width = 10, height = 15)
+```  
+
+```{r FilterFunc}
+filter.cor <- function(x, eps) {
+    if (is.matrix(x)) {
+      cor.df <- data.frame(which(abs(x) > eps, arr.in=TRUE))
+      setDT(cor.df, keep.rownames = TRUE)[]
+      cor.df$cor <- x[which(abs(x) > eps, arr.in=TRUE)]
+      cor.df <- cor.df[which(cor.df$row > cor.df$col, arr.in=TRUE)]
+      cor.df$cn <- colnames(x[, cor.df$col])
+      cor.list <- cor.df$rn
+      grx <- glob2rx("*.*")
+      duplicate.list <- grepl(grx,cor.list, perl=TRUE)
+      cor.list <- cor.list[!duplicate.list]
+      cor.df$rn <- sub(pattern = "(.*)\\..*$", replacement = "\\1", cor.df$rn)
+      corList <- list(CorMat = cor.df, cor.list = cor.list)
+      return(corList)
+    } else {
+      print("no matrix!")
+    }
+}
+
+
+df_numList <- filter.cor(cormat, eps=0.95)
+df_num2 <- df_numList$CorMat
+cor.list <- df_numList$cor.list
+cor.list <- cor.list[!cor.list %in% c("CoilID")]
+cor.list <- c(cor.list, "POSITION_X.y")
+length(cor.list)
+
+#List of all variables with abs. corr >= 95%
+write.table(cor.list, file="anna_length_ListofVariableswithCorLT095.txt", sep="\t")
+```  
+
+The list of variables with pairwise absolute correlation greater than or equal to .95 contains 29 variables. Before dropping such a large number of variables from the data set, it is necessary to review the summary statistics for any interesting patterns.
+
+### Computing Descriptives of Variables with Absolute Correlation >= |.95|
+
+```{r Descriptives4, echo = FALSE}
+df_cor2 <- df_num2 %>% 
+  dplyr::group_by(rn) %>% 
+  dplyr::summarise(
+    count = n(),
+    runique = length(unique(rn)),
+    unique = length(unique(cn)), 
+    cor_var = toString(cn),
+    na = sum(is.na(cn)), 
+    N=sum(!is.na(cn))
+  )
+df_cor2 %>%
+  kable("html", caption = "Variables w/ abs corr >= .95") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")
+```
+
+As no immediately worrying information can be seen in the table above, all variables listed in the cor.list are dropped from the dataset.
+
+```{r CorDrop2}
+#dropping corresponding columns
+df_num <- df_num %>%
+  dplyr::select(-cor.list)
+```
+
+### Correlation Matrix of Numeric Variables - Final
+
+```{r Cormat3, fig.width=10, fig.height=15, echo=FALSE}
+#recalculating cormat after dropping variables
+cormat <- round(cor(df_num, use="pairwise.complete.obs"),4)
+
+Upper.cormat <- df_num %>%
+  corrr::correlate() %>%
+  corrr::rearrange(method = "MDS", absolute = FALSE) %>%
+  corrr::shave() %>%
+  corrr::rplot(shape = 19, colors = c("red", "green"))
+Upper.cormat
+
+Upper.cormat %>%
+  ggplot2::ggsave(filename = "Upper.Corplot.NumVars.Updated_Again.png",
+                  width = 10, height = 15)
+```  
+
+
+One can now observe clearly the differences between the original correlation matrix, and our matrix built on the reduced data set. The remaining data, although still highly correlated in some ways, is less extremely correlated in general. When comparing between the above correlation matrix, and previous matrices, note that each indivdual matrix is ordered such that highly correlated variables are listed together, which changes the order of the variables presented in each matrix, as variables are dropped.
+
+```{r CorNet, fig.width=10, fig.height=15, include = FALSE, eval = FALSE, echo = FALSE}
+### Correlation Network of Numeric Variables
+
+#recalculating cormat after dropping variables
+cormat <- round(cor(df_num, use="pairwise.complete.obs"),4)
+
+Upper.cormat <- df_num %>%
+  corrr::correlate() %>%
+  corrr::network_plot(colors = c("red", "green"))
+Upper.cormat
+
+Upper.cormat %>%
+  ggplot2::ggsave(filename = "Upper.Corplot.NumVars.Updated_BigDrop.png",
+                  width = 15, height = 15)
+
+#Okay so
+#For anyone reading the code and maybe wondering 
+#"huh I never saw a a correlation network in the paper what is this"
+#This chunk isn't included in the run (see the include & eval = FALSE)
+#Because I don't think that, with this data, it produces an easily comprehendable figure
+#Although it is clear to see the analogous stucture in the big green mass with the lower right hand corner of the cormat
+#I don't think this gives any new insight to the correlations
+#But its neat
+#and I didn't want to delete it
+```
+
+### Computing Descriptives of Numeric Variables - Updated
+
+Having dropped a notable number of variables, the descriptive statistics are computed one final time for the numeric variables and are reviewed for interesting patterns.
+
+```{r Desccriptives5, echo = FALSE}
+df_num_long <- df_num %>%
+  gather(key=slab_attr, value=measurement) 
+
+df_num_desc3 <- df_num_long %>% 
+  dplyr::group_by(slab_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE), 
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    N=sum(!is.na(measurement))
+  )
+
+df_num_desc3 %>%
+    kable("html", caption = "Updated Numerical Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")  
+
+```  
+
+
+The working data set has now been reduced to 90 variables, all non-constant. Having reduced the numeric variables as much as seems required, these changes may be applied to the main data frame, df.
+
+## Applying Changes to Main Data Frame
+
+```{r Reduce2}
+#Reduce accordingly
+df <- df %>%
+  dplyr::select(-cor1.list, -cor.list, -var.sd0) %>%
+  dplyr::rename(
+    POSITION_X = POSITION_X.x
+  )
+
+#Dropping redundancies and piece related vars
+df <- df %>%
+  dplyr::select(-CHARGEN_NR, -VORBRAMME, -Length.max.slab) 
+```
+
+Our main data frame now has 88 variables and 26882 observations. With no additional motivation to reduce the data set further, the error rates can now be modeled, as a function of all remaining production variables, in order to determine which variables seem to have the most significant impact on the correct classification of a surface error. 
+
+***  
+
+## Modeling the Error Rates
+
+### Log Error Rates
+
+As the distributions of the error rates are highly skewed, in that, with a large number of observations there are relatively many zero values, one first applies a log transform to the (data +1), adjusting for the skew while simultaneously avoiding the issue of undefined log(0) option.
+
+```{r LogErrorTrans}
+#Log transform of error counts
+df1 <- df%>%
+  dplyr::mutate(lnClass.4 = log(Class.4 + 1), 
+                lnClass.14 = log(Class.14 + 1), 
+                lnClass.15 = log(Class.15 + 1))
+
+```  
+
+```{r DistEx, echo = FALSE, warning=FALSE, massage = FALSE}
+h1 <- qplot(df1$Class.4, geom = "histogram")
+h2 <- qplot(df1$Class.14, geom = "histogram")
+h3 <- qplot(df1$Class.15, geom = "histogram")
+h4 <- qplot(df1$lnClass.4, geom = "histogram")
+h5 <- qplot(df1$lnClass.14, geom = "histogram")
+h6 <- qplot(df1$lnClass.15, geom = "histogram")
+grid.arrange(h1, h2, h3, h4, h5, h6, ncol = 3)
+
+```
+
+Above, the log transformation is applied to the data. The histograms above show the spread of the data before and after the transform. The greatest effect of this transform can be seen in the Class 4 errors, but does not cause notable changes in the spread of the other two error classes. As such, the log transformation will only be utilized with the Class 4 errors.
+
+### Class 4 Errors
+
+#### Linear Model for Log(Class 4) Errors
+
+```{r Class4LinMod}
+linmodlnC4.pred <- lm(lnClass.4~.- CoilID - MAT_IDENT - lTileID - Class.4 - Class.14 - Class.15 - lnClass.14 - lnClass.15, data =df1)
+```
+``` {r SumAnova, echo = FALSE}
+summary(linmodlnC4.pred)
+
+anova(linmodlnC4.pred) %>%
+  kable("html", caption = "ANOVA Results of Linear Model for Log Error count of Class 4 Errors") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")  
+```  
+
+The first model used in this analysis is a linear model. The prediction equation used takes into account all variables, excluding those used for identification and those discussing the error counts themselves. Although the data is not expected to behave linearly, one still first applies a linear model, both to have a base line of possibly significant variables, and to review the usefullness of any specific predictor equations. As we are reviewing the data for all possible significant variables, we start with the full set of variables in our predictive equation, and reduce if necessary from there.
+  
+From the summary and ANOVA information presented above one can determine the variables which are statistically significant in predicting the occurance of log(class 4) errors, when the data is modeled using a linear model. 
+Significant variables as according to this model are:  
+
+* Highly Significant Variables (Pval < 0.001)
+    + TEMP__HA_1__IR__S
+    + KEIL40__FB__IR__S
+    + ARGON_DURCHFL_DUSCH
+    + TM_SSL_FS
+* Significant Variables (Pval <= 0.05)
+    + TO_FS_M
+    + TO_SSR_LS
+    + VG
+    + STOPFENSTELLUNG
+    + TM_LS_SSR
+    + TM_SSL_LS
+    + TU_LS_SSR
+    + TU_LS_M
+    + DT_FS
+    + DT_LS
+    + WASSER_SSL
+    + ENTZ__FS_ZW_F1__IR__S
+    + ENTZ__ZWR1_AL_SN2__IR__S
+    + TEMP__HA_5__IR__S
+  
+```{r LinSigVars, echo = FALSE, include = FALSE}
+#Try and grab vars with high significance and store in list, for comparison later
+
+```
+  
+Although all of these variables are marked as significant by the model, the model is fitting very poorly to the data, with an adjusted R^2^ value of 0.018. As the linear model is explaining so little of the variability in the data, it is necessary to use other models going forward for selecting significant variables. 
+  
+Tree models and random forest models will be used for all error classes to test for variable significance. For this work, conditional trees and conditional random forests have been used, by means of the ctree and cforest functions in the partykit and party packages, respectively. The party package can be utilized for both ctree and cforest, but the updated version, partykit, has improved upon the implementation of the old ctree function. Cforest is not yet fully developed in the partykit package, and is not used here. 
+Conditional trees were chosen for this analysis to avoid the bais seen in rpart trees. Rpart trees tend to select node variables with the greatest potential for many splits, while conditional trees implement a selection algorithm specifically designed to avoid this bais.
+
+
+#### Setting the Seed
+
+```{r}
+set.seed(80542)
+```
+
+Here a random seed is set to allow for reproducable results. 
+
+### Modeling Log Class 4 Error Counts w/ Conditional Tree
+
+In order to model the log error counts with a conditional tree, the same prediction equation used in the linear model is implemented. As such, all variables are considered as predictors, excluding those used for identification and those variables which describe the error counts themselves. This predictive equation is saved as "lnC4.pred", and is displayed below. A similar equation will be used in the analysis of each error class.
+
+```{r Class4Tree, fig.width=15, fig.height=10, warning=FALSE}
+index <- createDataPartition(df1$lnClass.4, p=0.75, list=FALSE)
+trainSet <- df1[ index,]
+testSet <- df1[-index,]
+
+predictors<- colnames(trainSet)
+predictors <- predictors[!predictors %in% c("CoilID", "MAT_IDENT", "lTileID", "lnClass.4", "Class.4", "Class.14", "Class.15", "lnClass.14", "lnClass.15")]
+lnC4.pred <- formula(paste("lnClass.4 ~ ", paste(predictors, collapse= " + ")))
+lnC4.pred
+output.tree <- partykit::ctree(lnC4.pred, data = trainSet)
+png("anna_tks_tree10.png", res=80, height=800, width=1600)
+plot(output.tree)
+dev.off()
+print(output.tree)
+plot(output.tree, 
+     main = "Log Class 4 Error Counts Tree",
+     gp = gpar(fontsize = 10),
+     inner_panel=node_inner,
+     ip_args=list(abbreviate = FALSE, id = FALSE)
+     )
+```  
+
+Above one can see both the r output describing the conditional tree, and the tree plot. One can determine that, according to the conditional tree model, the significant variables for predicting a Class 4 errror are:
+
+* VG
+* ENTZ__FS_ZW_F1__IR__S
+* KEIL40__FB__IR__S
+* TM_LS_SSL
+* TM_FS_SSR
+* V__FS_G5__IR__S
+* TEMP__HA__SR__MAX
+* TM_SSL_LS
+  
+These are listed without repetition, although within the tree VG is both the root node and an inner node. With regard to the plotted tree, the terminal nodes show a box plot of the observations in each node. For the nodes which do not present an obvious "box", the implication is that there are so many 0 observations in the node that the inner quartile range has compressed around 0. As such, those nodes with observable IQR ranges in the box plot can be known to contain more observations away from 0 --- ie errors. As such, one can see that, with regard to relative distributions, those nodes which contain the most error values are nodes 13, 15, 16, and 18. Variables which dictated the creation of these terminal nodes are: 
+
+* VG 
+* ENTZ__FS_ZW_F1__IR__S
+* TM_SSL_LS (<= 0.427)
+* KEIL40__FB__IR__S (> -0.0648)
+* TEMP__HA__SR__MAX
+* And, again, VG (>20.22)
+
+### Modeling Class 4 Error Counts w/ Conditional Tree - Binary Class 4
+
+In the above tree, the outcome variable, log(Class 4) errors, has multiple observable values. These different values most likely refer to slight variations in observed class 4 errors, or to changes in severity. As the goal of this analysis is to find variables linked to the presence of any error, regardless of severity, size, or other specifying qualities, it may be better to create a binary interpretation of the Class 4 error variable. This will allow the model to predict for the pure error rate, rather than forcing it to account for multiple levels of error. Below, a new variable is created from the original class 4 error data, providing a binary interpretation of the error rates.
+
+```{r MoreTrees, fig.width=5, fig.height=5}
+df1$C4 <- with(df1, Class.4>0)
+df1$C4<-factor(df1$C4, levels=c(FALSE,TRUE), labels=c("no.error", "error"))
+
+prop.table(table(df1$C4))
+```
+
+From the above proportion table we can see that, under the binary interpretation, our data split 76.52% "no Class 4 error" and 23.48% "Class 4 error".
+
+```{r Class4MoreTrees2, warning=FALSE, fig.width=15, fig.height=10}
+index <- createDataPartition(df1$C4, p=0.75, list=FALSE)
+
+trainSet <- df1[ index,]
+testSet <- df1[-index,]
+
+C4.pred <- formula(paste("C4 ~ ", paste(predictors, collapse= " + ")))
+output.tree <- partykit::ctree(C4.pred, data = trainSet)
+png("anna_tks_tree20.png", res=80, height=800, width=1600)
+plot(output.tree)
+dev.off()
+print(output.tree)
+plot(output.tree,
+     main = "Binary Class 4 Error Counts Conditional Tree",
+     gp = gpar(fontsize = 10),
+     inner_panel=node_inner,
+     ip_args=list(abbreviate = FALSE, id = FALSE)
+     )
+```  
+
+Now with a binary interpretation of Class 4 errors, the printed tree output and the plotted tree can be seen above. Where before the terminal panels showed a box plot of the data in each node, here instead is a bar chart, showing the proportion of errors vs non-errors in each terminal node. It is clear from observing the tree above that the nodes with the greatest proportion of errors are nodes 7 (34.2% errors), 18 (30.8% errors), 26 (33.5% errors), and 27 (39.1% errors). Reviewing the internal nodes, one can see the significant varaibles are:
+
+* VG
+* TM_LS_SSL
+* V__FS_G5__IR__S
+* POSITION_X
+* TEMP__HA_5__IR__S
+* TM_FS_SSR
+* STOPFENSTELLUNG
+* DICKE__VB__IR__S
+* WASSER_LS
+* TO_SSL_FS
+* ENTZ__FS_ZW_F1__IR__S
+* TUNDISH_POSITION
+
+Although not amoung those variables marked as of highest significance in the linear model, VG has now appeared as the most significant variable for both the binary tree, and for the tree describing the log(Class 4) error rates. But, having run these code chunks multiple times, it has been noted that the structure of the above binary tree varies widely between each run. As such, one progresses to the use of a random forest.
+
+### Modeling Class 4 w/ Conditional Random Forest
+
+In the initial run of this analysis, it was noted that there was a large amount of variation between each run, and that, without a stable seed, the results from independant runs were practically non-comparable. In part, the large amount of variability seen from model to model is due to the default construction of the cforest function. 
+
+The standard random forest model considers a default number of variables at each split in each tree, selecting randomly this amount of variables from the total avaliable. It also allows for the adjustment of the number of variables considered at each split within each tree through the use of the MTRY parameter, such that it can be increased for data sets with large numbers of variables. a specific tuning function used to ascertain the best value for the MTRY parameter iis also avliable in the randomForest package. This parameter is set internally in the cforest function to 5. It may be changed using the cforest_control function, but the party package does not come with a  tuning function for this parameter. As such, the parameter would need to be adjusted by trail and error, which is why, for this analysis, only the number of trees was increased and the MTRY parameter was left at the default level.
+
+Given that the df data frame used in the above code chunk to produce the conditional random forest contains 94 variables, many more trees are needed to consider all possible split options when MTRY is only set to 5. As such, the main alteration made to this analysis from that of Prof. Wilhelm is that the number of trees in the model above, and all following cforest models, has been increased to 1000. Tree counts of both 500 and 800 were also tested, but the amount of variability in the output models was not sufficiently decreased such as to review for significant variables. When the above model was grown with a larger amount of trees in the forest, a notable pattern of significant variables began to arise.
+
+```{r Class4VarImp}
+dev.off()
+trainSet2 <- trainSet[sample(1:nrow(trainSet), 10000,
+  	replace=FALSE),]
+output.forest <- party::cforest(C4.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c4 <- party::varimp(output.forest)
+png("anna_tks_tree20varimp.png", res=80, height=800, width=1600)
+barchart(tail(sort(var.imp.c4), 40), xlab="Variable Importance", main="Variable Importance for Class 4 Errors")
+var.imp.c4.1 <- var.imp.c4
+```
+
+```{r Barchart1, echo = FALSE, fig.height=10}
+barchart(tail(sort(var.imp.c4), 40), xlab="Variable Importance", main="Variable Importance for Class 4 Errors")
+```
+
+Rather than examining the structure of any trees in the forest, displayed above is the variable importance for the Class 4 random forest. This variable importance chart will be used to review for the most significant variables in the forest. All variable importances computed in this analysis follow the permutation principle of the "mean decrease in accuracy", which means that, the more the mean accuracy of the random forest decreases as caused by the removal or permutation of a variable, the more important that variable is deemed to be. One sees imediately that the variable deemed to be most significant in classifying Class 4 errors is here, again, VG. But, as the trees from before were suffereing from large amounts of variation, one tests the random forest model above for the same weaknesses below.
+
+```{r Class4RF2}
+output.forest <- party::cforest(C4.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c4 <- party::varimp(output.forest)
+png("anna_tks_tree20varimp.2.png", res=80, height=800, width=1600)
+barchart(tail(sort(var.imp.c4), 40), xlab="Variable Importance", main="Variable Importance for Class 4 Errors")
+var.imp.c4.2 <- var.imp.c4
+
+output.forest <- party::cforest(C4.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c4 <- party::varimp(output.forest)
+png("anna_tks_tree20varimp.3.png", res=80, height=800, width=1600)
+barchart(tail(sort(var.imp.c4), 40), xlab="Variable Importance", main="Variable Importance for Class 4 Errors")
+var.imp.c4.3 <- var.imp.c4
+```
+
+The above code chunk shows the creation of two additional random forest models, all grown from the same training split, and their corresponding variable importance calculations. amongst the three iterations of the model those variables which appeared within the top 20 most important variables for all three models are:
+
+```{r VarImpCompareC4, echo = FALSE}
+var.1.c4 <- var.imp.c4.1 %>%
+  sort() %>%
+  tail(20)
+var.2.c4 <- var.imp.c4.2 %>%
+  sort() %>%
+  tail(20)
+var.3.c4 <- var.imp.c4.3 %>%
+  sort() %>%
+  tail(20)
+
+Var1_2 <- intersect(names(var.1.c4), names(var.2.c4))
+Var2_3 <- intersect(names(var.2.c4), names(var.3.c4))
+Var1_3 <- intersect(names(var.1.c4), names(var.3.c4))
+C4Top20 <- intersect(Var1_3, Var1_2)
+C4Top20
+```  
+  
+Note that these variables are listed in order of increasing average importance across all three models. As such, VG is the most significant, on average, for all three models, followed by WASSER_SSR, TU_LS_M, and so on. In all three models, with the first of three used to generate the barchart above, the most important variable for accurate classification was VG, followed by WASSER_SSR.  Variable Importance barcharts for all three models, and all future models, have been saved with the knitting of this document.
+
+When considering the top 40 variables, the same amount considered for the barchart as a whole, the following variables were marked of highest importance.
+
+```{r VarImpCompareC42, echo = FALSE}
+var.1.c4 <- var.imp.c4.1 %>%
+  sort() %>%
+  tail(40)
+var.2.c4 <- var.imp.c4.2 %>%
+  sort() %>%
+  tail(40)
+var.3.c4 <- var.imp.c4.3 %>%
+  sort() %>%
+  tail(40)
+
+Var1_2 <- intersect(names(var.1.c4), names(var.2.c4))
+Var2_3 <- intersect(names(var.2.c4), names(var.3.c4))
+Var1_3 <- intersect(names(var.1.c4), names(var.3.c4))
+C4Top40 <- intersect(Var1_3, Var1_2)
+C4Top40
+```
+
+Again, these variables are listed in order of increasing average importance for all three models.
+
+```{r DropC4}
+df1 <- df1 %>%
+  dplyr::select(-C4)
+```
+
+***  
+
+## Class 14 Errors
+
+In all remaining models, the use of log error counts is eschewed in favor of the binary transformation. 
+
+### Modeling Class 14 Error Counts w/ Conditional Tree
+
+```{r LogErrorCounts}
+df1$C14 <- with(df1, Class.14>0)
+df1$C14<-factor(df1$C14, levels=c(FALSE,TRUE), labels=c("no.error", "error"))
+
+prop.table(table(df1$C14))
+```
+
+From the above proportion table, one can see that our data is 99.19% error free, and contains only 0.81% error observations.
+
+```{r Class14Tree, fig.width=10, fig.height=10}
+index <- createDataPartition(df1$C14, p=0.75, list=FALSE)
+trainSet <- df1[ index,]
+testSet <- df1[-index,]
+
+
+predictors<- colnames(trainSet)
+predictors <- predictors[!predictors %in% c("CoilID", "MAT_IDENT", "lTileID", "lnClass.4", "Class.4", "Class.14", "Class.15", "lnClass.14", "lnClass.15", "C4", "C14")]
+C14.pred <- formula(paste("C14 ~ ", paste(predictors, collapse= " + ")))
+output.tree.c14 <- partykit::ctree(C14.pred, data = trainSet)
+png("anna_tks_tree_c14_2.png", res=80, height=800, width=1600) 
+plot(output.tree.c14)
+dev.off()
+print(output.tree.c14)
+plot(output.tree.c14, 
+     main = "Log Class 14 Error Counts Tree",
+     gp = gpar(fontsize = 10),
+     inner_panel=node_inner,
+     ip_args=list(abbreviate = FALSE, id = FALSE)
+     )
+```
+
+The tree above has selected 5 different variables for its nodes. These are:
+
+* WASSER_SSL
+* TU_FS_M
+* TM_FS_SSR
+* VERTEILERFUELLSTAND
+* TU_SSL_FS
+
+Although these variables are selected here as significant, as with previous tree models in this analysis, the structure is highly volitile under different seeds. This may in part be due to the incredibly low rate of error observations in the data, paired with the relatively large number of variables. To cope with the notable variation between tree structures, the below conditional random forest is grown, again with the number of trees to be grown set to 1000.
+
+### Modeling Log Type 14 Error Counts w/ Conditional random forest
+
+```{r Class14RF}
+trainSet2 <- trainSet[sample(1:nrow(trainSet), 10000,
+  	replace=FALSE),]
+output.rf.c14 <- party::cforest(C14.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c14 <- party::varimp(output.rf.c14)
+png("anna_tks_rfc14varimp.1.png", res=80, height=800, width=1600) 
+barchart(tail(sort(var.imp.c14), 40), xlab="Variable Importance", main="Variable Importance Fehlertyp 14")
+var.imp.c14.1 <- var.imp.c14
+```
+
+```{r Barchart2, echo = FALSE, fig.height= 10}
+barchart(tail(sort(var.imp.c14), 40), xlab="Variable Importance", main="Variable Importance Fehlertyp 14")
+```  
+
+The above bar chart was constructed using the variable importance measures for the first of three conditional random forests, generated on the training split for the Class 14 errors. Just as with the Class 4 errors, three seperate random forest models were grown for the final analysis, in order to compare their results for variability.
+
+```{r Class14RF2}
+output.rf.c14 <- party::cforest(C14.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c14 <- party::varimp(output.rf.c14)
+png("anna_tks_rfc14varimp.2.png", res=80, height=800, width=1600) 
+barchart(tail(sort(var.imp.c14), 40), xlab="Variable Importance", main="Variable Importance Fehlertyp 14")
+var.imp.c14.2 <- var.imp.c14
+
+output.rf.c14 <- party::cforest(C14.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c14 <- party::varimp(output.rf.c14)
+png("anna_tks_rfc14varimp.3.png", res=80, height=800, width=1600) 
+barchart(tail(sort(var.imp.c14), 40), xlab="Variable Importance", main="Variable Importance Fehlertyp 14")
+var.imp.c14.3 <- var.imp.c14
+```
+
+The above chunk shows the construction of the additional two random forest models, trained on the same training split as the first model, whose variable importance is presented above. 
+
+When comparing across all three models, the 20 most important variables with regard to mean decease in accuracy are:
+
+```{r VarImpCompareC14, echo = FALSE}
+var.1.c14 <- var.imp.c14.1 %>%
+  sort() %>%
+  tail(20)
+var.2.c14 <- var.imp.c14.2 %>%
+  sort() %>%
+  tail(20)
+var.3.c14 <- var.imp.c14.3 %>%
+  sort() %>%
+  tail(20)
+
+Var1_2 <- intersect(names(var.1.c14), names(var.2.c14))
+Var2_3 <- intersect(names(var.2.c14), names(var.3.c14))
+Var1_3 <- intersect(names(var.1.c14), names(var.3.c14))
+C14Top20 <- intersect(Var1_3, Var1_2)
+C14Top20
+```
+
+Again, these variables are listed in order of increasing average importance across all three models. 
+
+When considering the top 40 most important variables for each model, as the barchart above shows for model 1, one finds the following variables to be shared by all three models.
+
+```{r VarImpCompareC142, echo = FALSE}
+var.1.c14 <- var.imp.c14.1 %>%
+  sort() %>%
+  tail(40)
+var.2.c14 <- var.imp.c14.2 %>%
+  sort() %>%
+  tail(40)
+var.3.c14 <- var.imp.c14.3 %>%
+  sort() %>%
+  tail(40)
+
+Var1_2 <- intersect(names(var.1.c14), names(var.2.c14))
+Var2_3 <- intersect(names(var.2.c14), names(var.3.c14))
+Var1_3 <- intersect(names(var.1.c14), names(var.3.c14))
+C14Top40 <- intersect(Var1_3, Var1_2)
+C14Top40
+```
+
+  
+```{r DropC14}
+df1 <- df1 %>%
+  dplyr::select(-C14)
+```
+  
+***  
+  
+## Class 15 Errors
+
+### Modeling Class 15 Error Counts w/ Conditional Tree
+
+```{r PropTable15}
+df1$C15 <- with(df1, Class.15>0)
+df1$C15<-factor(df1$C15, levels=c(FALSE,TRUE), labels=c("no.error", "error"))
+
+prop.table(table(df1$C15))
+```
+
+As with the Class 14 errors, there is an extremely low observance rate of Class 15 errors in our data set. Only 0.74% of our observations are Class 15 errors, while 99.26% are error free.
+
+```{r Class15Tree, fig.width=10, fig.height=8, warning = FALSE}
+index <- createDataPartition(df1$C15, p=0.75, list=FALSE)
+trainSet <- df1[ index,]
+testSet <- df1[-index,]
+
+outcomeName<-'C15'
+predictors <- predictors[!predictors %in% c("CoilID", "MAT_IDENT", "lTileID", "lnClass.4", "Class.4", "Class.14", "Class.15", "lnClass.14", "lnClass.15", "C4", "C14", "C15")]
+
+C15.pred <- formula(paste("C15 ~ ", paste(predictors, collapse= " + ")))
+output.tree.c15 <- partykit::ctree(C15.pred, data = trainSet)
+png("anna_tks_tree_c15_2.png", res=80, height=800, width=1600) 
+plot(output.tree.c15)
+dev.off()
+print(output.tree.c15)
+plot(output.tree.c15, 
+     main = "Log Class 15 Error Counts Tree",
+     gp = gpar(fontsize = 10),
+     inner_panel=node_inner,
+     ip_args=list(abbreviate = FALSE, id = FALSE)
+     )
+```  
+
+The above output shows the conditional tree grown for Class 15 errors. The node which has the highest number of errors is node 10, which is 23.1% Class 15 errors. The variables chosen for inner nodes in this tree are listed as follows, without repetition.
+
+* STRANGBREITE
+* DICKE__VB__IR__S
+* ENTZ__FS_ZW_F2__IR__S
+* TO_LS_M
+
+Again, iteratively growing the tree showed notable amounts of variation in structure, so 3 random forest models, with tree count set to 1000, have been grown below.
+
+### Modeling Type 15 Error Counts with random forest
+
+```{r Class15RF}
+trainSet2 <- trainSet[sample(1:nrow(trainSet), 10000,
+  	replace=FALSE),]
+output.rf.c15 <- party::cforest(C15.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c15 <- party::varimp(output.rf.c15)
+png("anna_tks_rfc15varimp.1.png", res=80, height=800, width=1600) 
+barchart(tail(sort(var.imp.c15), 40), xlab="Variable Importance", main="Variable Importance Class 15 Error")
+var.imp.c15.1 <- var.imp.c15
+```  
+
+```{r Class15BarChart, echo = FALSE, fig.height=10}
+barchart(tail(sort(var.imp.c15), 40), xlab="Variable Importance", main="Variable Importance Class 15 Error")
+#if out.height doesn't work how you wnat
+#try fig.height
+```
+
+Above is the variable importance barchart for the first conditional random forest model for Class 15 errors. Imediately obvious is the fact that most variables chosen by the tree above do not feature in the first 20 variables, excluding STRANGBREITE. This again stresses the variation in the model on the tree level. In order to cope with this variability, two more random forest models are grown below, on the same training split as the model above, and their most important variables are compared.  
+
+```{r Class15RF2}
+output.rf.c15 <- party::cforest(C15.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c15 <- party::varimp(output.rf.c15)
+png("anna_tks_rfc15varimp.2.png", res=80, height=800, width=1600) 
+barchart(tail(sort(var.imp.c15), 40), xlab="Variable Importance", main="Variable Importance Class 15 Error")
+var.imp.c15.2 <- var.imp.c15
+
+output.rf.c15 <- party::cforest(C15.pred, data = trainSet2, control = cforest_control(ntree =1000))
+var.imp.c15 <- party::varimp(output.rf.c15)
+png("anna_tks_rfc15varimp.3.png", res=80, height=800, width=1600) 
+barchart(tail(sort(var.imp.c15), 40), xlab="Variable Importance", main="Variable Importance Class 15 Error")
+var.imp.c15.3 <- var.imp.c15
+```
+
+Those variables which ranked in the top 20 most important for each model are listed as follows.
+
+```{r VarImpCompareC15, echo = FALSE}
+var.1.c15 <- var.imp.c15.1 %>%
+  sort() %>%
+  tail(20)
+var.2.c15 <- var.imp.c15.2 %>%
+  sort() %>%
+  tail(20)
+var.3.c15 <- var.imp.c15.3 %>%
+  sort() %>%
+  tail(20)
+
+Var1_2 <- intersect(names(var.1.c15), names(var.2.c15))
+Var2_3 <- intersect(names(var.2.c15), names(var.3.c15))
+Var1_3 <- intersect(names(var.1.c15), names(var.3.c15))
+C15Top20 <- intersect(Var1_3, Var1_2)
+C15Top20
+```
+
+The above variables are listed in order of increasing average importance across all three models. When considering the top 40 most important variables for all three models, we find that the variables listed below are shared by all three.
+
+```{r VarImpCompareC152, echo = FALSE}
+var.1.c15 <- var.imp.c15.1 %>%
+  sort() %>%
+  tail(40)
+var.2.c15 <- var.imp.c15.2 %>%
+  sort() %>%
+  tail(40)
+var.3.c15 <- var.imp.c15.3 %>%
+  sort() %>%
+  tail(40)
+
+Var1_2 <- intersect(names(var.1.c15), names(var.2.c15))
+Var2_3 <- intersect(names(var.2.c15), names(var.3.c15))
+Var1_3 <- intersect(names(var.1.c15), names(var.3.c15))
+C15Top40 <- intersect(Var1_3, Var1_2)
+C15Top40
+```
+
+```{r Drop C15}
+df1 <- df1 %>%
+  dplyr::select(-C15)
+```
+
+## Comparing Significant Variables across Error Classes
+
+As the errors are all ocurring on the same sheets, it is possible that the errors are, at times, ocurring simultaneously. With this in mind, it is useful to know which, if any, variables are significant for classifying all three error classes. 
+
+Variables which were ranked as being in the top 20 most important variables for all three error class models are listed as follows. 
+
+```{r VarImpCompareAllMods20, echo = FALSE}
+C4_14Top20 <- intersect(C4Top20, C14Top20)
+C4_15Top20 <- intersect(C4Top20, C15Top20)
+C14_15Top20 <- intersect(C14Top20, C15Top20)
+AllTop20 <- intersect(C4_14Top20, C4_15Top20)
+AllTop20
+
+```
+
+Varaibles marked as one of the top 40 significant variables in all three error classes' conditional random forest models are:
+
+```{r VarImpCompareAllMods40, echo = FALSE}
+C4_14Top40 <- intersect(C4Top40, C14Top40)
+C4_15Top40 <- intersect(C4Top40, C15Top40)
+C14_15Top40 <- intersect(C14Top40, C15Top40)
+AllTop40 <- intersect(C4_14Top40, C4_15Top40)
+AllTop40
+
+```
+
+## Conclusion
+
+In the above analysis, data produced during earlier data reduction and treatment, steps 1-4 avaliable on the Nextcloud server, is treated for possible redundancies produced by highly correlated variables and reviewed for any interesting patterns. The data is then used to create tree and forest models for classifying the presence or lack of three seperate error types --- Classes 4, 14, and 15. 
+
+### Class 4 Conclusion
+
+First, Class 4 errors are transformed using a log(data + 1) transformation. This was done in an attempt to deal with the high levels of skew in the data, or, in other words, to deal with the very low occurancce rate of errors in the data. Class 4 errors were the only class to show notable change under the transformation, as this error type had multiple levels throughout the observations. When modeled with a linear regression model, 18 different variables were found to have significant effect in the model. But, as the model was presenting with an incredibly poor fit, these results were regarded as suspect. In order to create a better fitting model to the data at hand, conditional tree and conditional random forest models were grown for the data. 
+
+For the first tree, the log transformation of Class 4 error was again used as the response variable of the model. Although the tree was highly volitile under different seeds, the variables marked as significant were,
+
+* Log(Class 4) Tree -- Significant Variables
+    + VG
+    + ENTZ__FS_ZW_F1__IR__S
+    + KEIL40__FB__IR__S
+    + TM_LS_SSL
+    + TM_FS_SSR
+    + V__FS_G5__IR__S
+    + TEMP__HA__SR__MAX
+    + TM_SSL_LS
+
+A binary transformation was then created for the Class 4 error variable, which simply marked the presence or absence of an error. This was then provided to a new conditional tree. The tree grown with a binary response generated the following significant variables.
+
+* Binary(Class 4) Tree -- Significant Variables
+    + VG
+    + TM_LS_SSL
+    + V__FS_G5__IR__S
+    + POSITION_X
+    + TEMP__HA_5__IR__S
+    + TM_FS_SSR
+    + STOPFENSTELLUNG
+    + DICKE__VB__IR__S
+    + WASSER_LS
+    + TO_SSL_FS
+    + ENTZ__FS_ZW_F1__IR__S
+    + TUNDISH_POSITION
+    
+Again, under different seeds this tree's structure was found to be highly variable. It is worth noting that these two trees already share some variables of significance. Both models utilize the following variables at various inner nodes.
+
+* Class 4 Trees - Shared Significant Variables
+    + VG
+    + ENTZ__FS_ZW_F1__IR__S
+    + V__FS_G5__IR__S
+    + TM_FS_SSR
+    + TM_LS_SSL
+
+Finally, to deal with the variability in the tree structure, three conditional random forest models were created. The first version of this analysis grew forests with only the default 500 trees, but it was found that such models were still highly volitile under different seeds, and as such, the tree count in the forest was increased first to 800, and then finally to the 1000 trees seen grown in all above conditional forest models. The MTRY parameter, which controls the number of variables considered at each split in each tree of the forest was also considered for tuning, but as there is not a built in function for the party package to tune this parameter, it was left at the default 5, to avoid the possibility of overfitting. All three forests were grown from the same training split, to allow for comparibility of output.
+
+Each conditional forest produced slightly different results for variable importantance results, due to the inherent variablity in the creation of the forest model. That being said, the three models produced above still marked a notable number of the same variables as being of comparable importance. Of the top 20 most important variables in each forest, all three models included the following variables. Note that these are listed in order of increasing average importance across all three models, such that the most important variable on average for the three models was VG. 
+
+```{r top20Class4}
+C4Top20  
+```
+  
+In this list we see only one variable which is shared by the two conditional trees: VG. 
+
+Of the top 40 variables marked as most important in each model, the three models shared the following.
+
+``` {r Top40C4}
+C4Top40   
+```
+  
+### Class 14 Conclusion
+
+As the log transform for Class 14 errors did not appear to have a useful effect on the data set, only the binary transformation was applied and modeled. The tree created for the binary Class 14 error variable was again highly volitile. The tree that was grown under the seed used here only selected one variable, DT_FS, as significant for classifying the response, while each node then contained less than 1% errors. Again, the tree count of the random forest model was boosted to 1000, and three conditional random forests were grown in order to compare results for volitility. 
+
+Given inherent expections of variability in output, all three models still selected a notable group of variables which were marked significant in each individual model. They are listed as follows, in order of increasing average importance for all three models.
+
+```{r Top20Class14}
+C14Top20
+```
+
+As one can see, the variable marked as significant in the orginal tree is not in the shared variables for the top 20 variables in the three models. DT_FS is amongst those variables shared within the Top 40 most important variables though, the list of which follows below.
+
+```{r Top40Class14}
+C14Top40  
+```
+  
+### Class 15 Conclusion
+
+Again, the log transformation of the class 15 errors was not useful for dealing with the poor spread of the data, so only the binary response was modeled for this class.
+
+The conditional tree grown under varying seeds was observed to be highly volitile, again due to the low observation rate of class 15 errors and the relatively high number of variables in the data set. Still, it marked 4 different variables -- one was used twice at two seperate nodes -- as being significant for selecting class 15 errors. Node 9 of this tree caught the majority of the errors in the data set - of the approximately 12.9% of the observations in the training set which were errors, node 9 contains 7.4%
+
+To deal with the large amounts of volitility seen in the tree model, 3 seperate random forest models were grown on the same training set, and their results were compared. In the top 20 variables marked as most important across all three models, those that were shared are listed below in order of increasing average importance for the three models.
+
+```{r Top20C15}
+C15Top20  
+```
+  
+The variables which were shared by each model in the list of top 40 most important variables follow bellow.
+
+```{r Top40C15}
+C15Top40  
+``` 
+  
+
+Finally, the variables shared by all three error class model sets as being in the top 20 most important variables are listed in increasing order of importance, as follows.
+
+```{r Top20All}
+AllTop20
+```
+
+***
+
+## References  
+
+* Hothorn, Torsten, et al. "Ctree: Conditional Inference Trees." Ctree: Conditional Inference Trees, Cran, cran.r-project.org/web/packages/partykit/vignettes/ctree.pdf.
+
+* Jackson, Simon. "Exploring Correlations in R with Corrr . BlogR." BlogR on Svbtle, 21 Aug. 2018, drsimonj.svbtle.com/exploring-correlations-in-r-with-corrr.  
+
+* Zhu, Hao. "Package 'KableExtra.'" KableExtra.pdf, Cran, 22 Jan. 2019, cran.r-project.org/web/packages/kableExtra/kableExtra.pdf.
+

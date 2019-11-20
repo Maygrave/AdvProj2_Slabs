@@ -1,0 +1,430 @@
+---
+title: "Step 2 - SGA Dataset Reduction"
+author: "Anna Ruby"
+date: "February 1, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Importing Libraries
+
+```{r ImportLibraries, warning=FALSE}
+rm(list=ls())
+library(readxl)
+library(tidyverse)
+library(doBy)
+library(caret)
+library(randomForest)
+library(data.table)
+library(knitr)
+library(kableExtra)
+library(summarytools)
+
+```
+
+```{r, echo = FALSE, include = FALSE}
+st_css()
+```
+
+## Loading Data
+
+Note that Prof. Wilhelm's ident matrix data will be used here, as well as the "tks_logitudinal.Rdata" file used in the creation of my ident data.
+
+```{r LoadData}
+load("../Data/tks_longitudinal.Rdata")
+load("../Data/stage8_ident.Rdata")
+```
+
+## Prepping SGA Data  
+
+```{r SGASum, results="asis", prompt=FALSE, cache=FALSE, echo = FALSE}
+#Using data file 'SGA_Prozessdaten_Durchsatz'
+#Currently 84 var approx 8.838 x 10^5 obs
+
+#Getting the summary statistics of the data
+print(dfSummary(SGA_Prozessdaten_Durchsatz, valid.col = FALSE, graph.magnif = 0.75, plain.ascii = FALSE, footnote = NA), max.tbl.height = 400, method = "render", 
+headings = FALSE, bootstrap.css = FALSE)
+```
+  
+By looking at the summary statistics one can immeadiately see three odd variables: "QUALITAET", "GSR_AUTO", and "VG_Min". Qualitaet appears to be a categorical variable with only one level while both GSR_Auto and VG_Min seem to be constant. We also have a couple of time dependant variables, which are to be removed.
+As both GSR_Auto and VG_Min are both completely constant, we will drop them below as well.
+
+```{r DateForm, eval=FALSE, include=FALSE}
+#Changing Date format
+#two variables need updated (SEQBEGINN & ZEITSTEMPEL)
+data_SGA <- SGA_Prozessdaten_Durchsatz %>%
+  dplyr::mutate(
+    SEQBEGINN = as.Date(SEQBEGINN, format = "%Y-%m-%d %H:%M:%S"),
+    ZEITSTEMPEL = as.Date(ZEITSTEMPEL, format = "%Y-%m-%d %H:%M:%S")
+  )
+```
+
+### Removing Variables
+
+First, the two time dependant, constant, and redundant variables are dropped. These are, respectively,  
+
+* "SEQBEGINN" 
+* "ZEITSTEMPEL"
+* "VG_MIN"
+* "GSR_AUTO"
+* "QUALITAET"
+* "SCHMELZE"
+* "BRAMMENNUMMER"
+* "LFD"
+* "STRANGLAENGE"
+  
+```{r Drop1}
+#dropping variables
+
+data_SGA <- dplyr::select(SGA_Prozessdaten_Durchsatz, -c("SEQBEGINN", "ZEITSTEMPEL", "VG_MIN", "GSR_AUTO", "QUALITAET", "SCHMELZE", "BRAMMENNUMMER", "LFD", "STRANGLAENGE"))
+```
+
+Then, variables are removed at the request of Dr. Eberle. _(Email on 27.8.18)_
+
+```{r Drop2}
+#drop any TSCHL var
+data_SGA <- data_SGA %>%
+  dplyr::select(-starts_with("TSCHL"))
+```  
+
+Finally, variables are removed as per S. Karrasch.
+
+```{r Drop3}
+#dropping variables at the instruction of S. Karrasch
+data_SGA <- data_SGA %>%
+  dplyr::select(-SCHIEBERFAHRT, -DAUERTEMPERATUR, -GEWICHT)
+```
+
+### Data Manipulation
+
+```{r SplitDFByType}
+#Changing TUNDISH_POSITION from int to numeric
+data_SGA <- data_SGA %>%
+  dplyr::mutate(
+    TUNDISH_POSITION = as.numeric(TUNDISH_POSITION)
+  )
+
+#Creating variable lists acorrding to type
+df <- data_SGA
+var.index <- c("CHARGEN_NR", "VORBRAMME")
+var.list <- colnames(df)
+var.int <- colnames(df[,sapply(df,is.integer)])
+var.factor <- colnames(df[,sapply(df,is.factor)])
+var.num <- colnames(df[,sapply(df,is.numeric)])
+
+#split above DF acording to type
+df_int <- df %>%
+  dplyr::select(var.index,var.int)
+df_factor <- df %>%
+  dplyr::select(var.index,var.factor)
+df_num <- df %>%
+  dplyr::select(var.num, -var.int)
+var_num <- colnames(df_num)
+```
+
+```{r SGA2Long, warning = FALSE}
+#Convert SGA to long format - check data availability & missing patterns
+data_SGA_long <- data_SGA %>%
+  tidyr::gather(key=length_attr, value=measurement, -c(CHARGEN_NR, VORBRAMME, RIEGELLAENGE))
+```
+
+
+#### Computing descriptives
+
+```{r Descriptives1, echo = FALSE}
+#summary statistics
+data_SGA_desc <- data_SGA_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    N=sum(!is.na(measurement))
+  )
+#using kable table to display summary descriptives
+data_SGA_desc %>% 
+  kable("html", caption = "Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")
+```
+  
+Using the above table we can see that there are no missings in the data.
+
+```{r DropConst, eval= FALSE, include=FALSE}
+#Dropping consant vars
+var.SGA.const <- data_SGA_desc%>%
+  dplyr::filter(unique == 1) %>%
+  dplyr::select(length_attr) %>%
+  unlist()
+
+data_SGA <- data_SGA %>%
+  dplyr::select(-var.SGA.const)
+
+#Dropped the only two constant variables above using table
+#Not including this code chunk in the final markdown doc
+```
+
+### Reviewing Variable Distributions
+#### Binary Variables
+
+```{r Distributions1}
+#Checking dist of binary vars
+var.SGA.bin <- data_SGA_desc%>%
+  dplyr::filter(unique == 2) %>%
+  dplyr::select(length_attr) %>%
+  unlist()
+
+data_SGA_bin_long <- data_SGA_long %>%
+  dplyr::filter(length_attr %in% var.SGA.bin) 
+```
+
+```{r Plot1, echo = FALSE}
+p <- ggplot(data = data_SGA_bin_long, aes(x = measurement )) + geom_bar(stat="Count") + facet_wrap(~length_attr, scales = "free") 
+p 
+ggsave("../images_1/step2/BinaryVarsDist.png")
+``` 
+
+Three variables here have the one of the binary options set to zero. As this is not matched by an expected 1, it is possible that these are actually masked missing values, although this cannot be confirmed here.
+  
+#### Numeric Variables - 1--16
+
+```{r Distributions2}
+#Checking dist of integer variables
+#Checking them in groups, as there are so many variables
+data_SGA_num_long <- data_SGA_long %>%
+  dplyr::filter(length_attr %in% var_num[1:16]) %>%
+  dplyr::mutate(
+    measurement = as.numeric(measurement)
+  )
+```
+
+```{r Plot2, echo = FALSE}
+p <- ggplot(data = data_SGA_num_long, aes(x = measurement)) + geom_histogram() + facet_wrap(~length_attr, scales = "free") 
+p
+ggsave("../images_1/step2/NumVarDist_1.png")
+```  
+
+The first variable in var_num is "RIEGELLAENGE", which has been dropped from our working data, so it does not show a histogram. Although some numeric variables are presenting with skewing, the majority of these seem to be _generally_ following some normal distribution. This notably exculdes TO_FS_SSL, which has one high tight spike just below 200 and a handful of 0 values, which may be masked missings.  
+
+#### Numeric Variables - 17--32
+
+```{r Distributions3}
+data_SGA_num_long <- data_SGA_long %>%
+  dplyr::filter(length_attr %in% var_num[17:32]) %>%
+  dplyr::mutate(
+    measurement = as.numeric(measurement)
+  )
+```
+
+```{r Plot3, echo = FALSE}
+p <- ggplot(data = data_SGA_num_long, aes(x = measurement)) + geom_histogram() + facet_wrap(~length_attr, scales = "free") 
+p 
+ggsave("../images_1/step2/NumVarDists_2.png")
+```  
+
+There is one notable bi-modal distribution amoungst this set, but overall, with few exceptions, these also seem to be following generally normal distributions. Again, with regard to exceptions, we see two variables, TU_FS_M & TU_LS_SSL, which have high tight spikes and, seperately, notable amoutns of 0 values. These may, again, be masked missing values.
+Overall, we see 4 variables that experience high and narrow behaviors, 
+
+* TU_FS_M
+* TU_LS_M
+* TU_LS_SSL
+* TU_LS_SSR
+  
+#### Numeric Variables - 33--48
+
+```{r Distributions4}
+data_SGA_num_long <- data_SGA_long %>%
+  dplyr::filter(length_attr %in% var_num[33:48]) %>%
+  dplyr::mutate(
+    measurement = as.numeric(measurement)
+  )
+```
+
+```{r Plot4, echo = FALSE}
+p <- ggplot(data = data_SGA_num_long, aes(x = measurement)) + geom_histogram() + facet_wrap(~length_attr, scales = "free") 
+p 
+ggsave("../images_1/step2/NumVarDists_3.png")
+```  
+
+Distributions seen here are markedly more irregular than those seen earlier. STOPFENSTELLUNG has two notable gaps in an otherwise normal seeming distribution.
+  
+#### Numeric Variables - 49--65
+
+```{r Distributions5}
+data_SGA_num_long <- data_SGA_long %>%
+  dplyr::filter(length_attr %in% var_num[49:60]) %>%
+  dplyr::mutate(
+    measurement = as.numeric(measurement)
+  )
+```
+
+```{r Plot5, echo = FALSE}
+p <- ggplot(data = data_SGA_num_long, aes(x = measurement)) + geom_histogram() + facet_wrap(~length_attr, scales = "free") 
+p
+ggsave("../images_1/step2/NumVarDists_4.png")
+```  
+
+Note that GSR_AUTO has been dropped from our data, and therefore does not produce a histogram. Almost all variables here are presenting with abnormal distributions, and many appear, at a glance, to have a very high number of missing values, such as SPI_Signal. Many of these may be flag variables, although that cannot be conclusively determined here.
+
+#### Computing Descriptives
+
+```{r Descriptives2, echo = FALSE}
+data_SGA_num_long <- data_SGA_long %>%
+  dplyr::filter(length_attr %in% var_num) %>%
+  dplyr::mutate(
+    measurement = as.numeric(measurement)
+  )
+SGA_num_desc <- data_SGA_num_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE), 
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    N=sum(!is.na(measurement))
+  )
+SGA_num_desc %>% 
+  kable("html", caption = "Numeric Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")
+```  
+
+```{r Drop4}
+#Removing constant vars, conditional on 0 being a masked missing (assuming 0 is a masked missing)
+var.SGA.num.const <- SGA_num_desc%>%
+  dplyr::filter(unique == 2 & min == 0.0) %>% #Checks for binary variables, with a min of 0 
+  dplyr::select(length_attr) %>%
+  unlist()
+
+data_SGA <- data_SGA %>%
+  dplyr::select(-var.SGA.num.const)
+
+#Setting 0's to NA as per S. Karrasch
+#note that this effects the variables thought to be masked missings in 
+#set 2 and 4
+data_SGA <- data_SGA %>%
+  dplyr::mutate(
+    TO_FS_SSL = replace(TO_FS_SSL, which(TO_FS_SSL == 0L), NA),
+    TU_FS_M = replace(TU_FS_M, which(TU_FS_M == 0L), NA),
+    TU_LS_SSR = replace(TU_LS_SSR, which(TU_LS_SSR == 0L), NA),
+    TU_LS_M = replace(TU_LS_M, which(TU_LS_M == 0L),  NA),
+    TU_LS_SSL = replace(TU_LS_SSL, which(TU_LS_SSL == 0L), NA),
+    SCHLACKESIGNAL = replace(SCHLACKESIGNAL, which(SCHLACKESIGNAL == 0L),  NA),
+    SPI_SIGNAL = replace(SPI_SIGNAL, which(SPI_SIGNAL == 0L),  NA),
+    SP_SIGNAL = replace(SP_SIGNAL, which(SP_SIGNAL == 0L),  NA)
+  )
+```
+
+#### Computing Descriptives
+
+```{r Descriptives3, echo = FALSE}
+data_SGA_long <- data_SGA %>%
+  tidyr::gather(key=length_attr, value=measurement, -c(CHARGEN_NR, VORBRAMME, VORG_HAUPTAGGREGAT, STRANGNUMMER, RIEGELLAENGE))
+
+data_SGA_desc <- data_SGA_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE),
+    na.p100 = na/count*100,
+    N=sum(!is.na(measurement))
+  )
+#na.p100 shows the percentage of the obs that are missing
+data_SGA_desc %>% 
+  kable("html", caption = "Variable Descriptives") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")
+```  
+
+In the above table, na.p100 indcates the percentage of missings observations for each variable. Note that SPI_SIGNAL is >96% missings. Other variables with notably high missings percentages are SP_Signal & SCHLACKESIGNAL, which are both approximately 30% missing.
+No other variable exceeds 6% missings.
+
+```{r Drop5}
+#Dropping variables with too many missings
+var.SGA.na <- data_SGA_desc%>%
+  dplyr::filter(na.p100 > 10 ) %>%
+  dplyr::select(length_attr) %>%
+  unlist()
+
+data_SGA <- data_SGA %>%
+  dplyr::select(-var.SGA.na)
+#dropped three mentioned above
+```
+
+#### Computing Descriptives
+
+```{r Descriptives4, echo = FALSE}
+data_SGA_long <- data_SGA %>%
+  tidyr::gather(key=length_attr, value=measurement, -c(CHARGEN_NR, VORBRAMME, VORG_HAUPTAGGREGAT))
+
+data_SGA_desc <- data_SGA_long %>% 
+  dplyr::group_by(length_attr) %>% 
+  dplyr::summarise(
+    count = n(),
+    unique = length(unique(measurement)), 
+    na = sum(is.na(measurement)), 
+    mean = mean(measurement, na.rm=TRUE), 
+    sd = sd(measurement, na.rm = TRUE),
+    min = min(measurement, na.rm=TRUE), 
+    max=max(measurement, na.rm=TRUE),
+    na.p100 = na/count*100,
+    N=sum(!is.na(measurement))
+  )
+data_SGA_desc %>% 
+  kable("html", caption = "Variable Descriptives - Updated") %>%
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = F, position = "center") %>%
+  scroll_box(height = "400px")
+```  
+
+In the reduced data set there is no variable missing more tha 7% of its observations. We have removed all redundant, time-dependant, constant, and requested variables.
+
+## Saving Data, Data Validation, and Final Comments  
+### Saving the Data
+
+Again, data was saved before validation to ensure accurate comparisons.
+
+```{r SaveData}
+save(data_SGA, data_SGA_desc, file="../anna_data/anna_data_SGA_1.Rdata")
+```  
+
+### Validating Data
+
+```{r ValidateData}
+#Clearing all data files
+rm(list=ls())
+
+#~~Validating againt Wilhelm's Data~~#
+
+#loading my data
+load("../anna_data/anna_data_SGA_1.Rdata")
+anna_data_SGA <- data_SGA
+anna_SGA_desc <- data_SGA_desc
+rm(data_SGA, data_SGA_desc)
+
+#loading Wilhelm's
+load("../Data/data_SGA.Rdata")
+
+#comparison data_SGA
+dplyr::anti_join(data_SGA, anna_data_SGA)
+#both 0  - data sets match!
+
+#comparison data_SGA_desc
+dplyr::anti_join(data_SGA_desc, data_SGA_desc)
+#Both 0 - data sets match!!
+```
+
+All data has been successfully validataed against the data orignally created by Prof. Wilhelm.  
+
+### Final Comments
+This data file was succesfully recreated, reorganized, and creates matching output to the final output gerneated by Prof. Wilhelm. As the data has fully matched to the previously created data, I will be substituing these files for Prof. Wilhelm's going forward.
